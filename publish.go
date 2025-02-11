@@ -3,6 +3,8 @@ package rerabbit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/streadway/amqp"
 )
@@ -113,4 +115,75 @@ func (r *rabbitBroker) Consume(ctx context.Context, opts ConsumeOptions, handler
 	}()
 
 	return nil
+}
+
+// ConsumeLimited consumes messages from the queue, but stops after maxMessages.
+func (r *rabbitBroker) ConsumeLimited(ctx context.Context, opts ConsumeOptions, maxMessages int, handler func(context.Context, amqp.Delivery)) error {
+	msgs, err := r.channel.Consume(
+		opts.QueueName, opts.ConsumerTag, opts.AutoAck, opts.Exclusive, opts.NoLocal, opts.NoWait, opts.Args,
+	)
+	if err != nil {
+		return err
+	}
+
+	for i := 0; i < maxMessages; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case msg, ok := <-msgs:
+			if !ok {
+				return fmt.Errorf("channel closed")
+			}
+			handler(ctx, msg)
+		}
+	}
+
+	return nil
+}
+
+// PublishWithRetry publishes a message to the exchange with the specified routing key.
+func (r *rabbitBroker) PublishWithRetry(ctx context.Context, opts PublishOptions, maxRetries int, retryDelay time.Duration) error {
+	var lastErr error
+
+	for i := 0; i <= maxRetries; i++ {
+		err := r.Publish(ctx, opts)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if i < maxRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
+	}
+
+	return fmt.Errorf("publish failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// PublishWithConfirm publishes a message to the exchange with the specified routing key and waits for a confirmation.
+func (r *rabbitBroker) PublishWithConfirm(ctx context.Context, opts PublishOptions, timeout time.Duration) error {
+	if err := r.channel.Confirm(false); err != nil {
+		return fmt.Errorf("failed to put channel in confirm mode: %w", err)
+	}
+
+	confirmCh := r.channel.NotifyPublish(make(chan amqp.Confirmation, 1))
+
+	err := r.Publish(ctx, opts)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case confirm := <-confirmCh:
+		if confirm.Ack {
+			return nil // Сообщение подтверждено
+		}
+		return fmt.Errorf("message was not confirmed")
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout waiting for publish confirmation")
+	}
 }

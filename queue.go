@@ -65,3 +65,13 @@ func (r *rabbitBroker) QueueUnbind(opts UnbindOptions) error {
 		opts.Args,
 	)
 }
+
+// DeclareQueueWithDLX declares a queue with a Dead Letter Exchange
+func (r *rabbitBroker) DeclareQueueWithDLX(opts QueueOptions, dlxName string) (amqp.Queue, error) {
+	if opts.Args == nil {
+		opts.Args = amqp.Table{}
+	}
+	opts.Args["x-dead-letter-exchange"] = dlxName // Указываем DLX
+
+	return r.QueueDeclare(opts)
+}

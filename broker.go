@@ -2,6 +2,7 @@ package rerabbit
 
 import (
 	"context"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
@@ -20,16 +21,22 @@ type RabbitBroker interface {
 	// -- Bind / Unbind --
 	QueueBind(opts BindOptions) error
 	QueueUnbind(opts UnbindOptions) error
+	DeclareQueueWithDLX(opts QueueOptions, dlxName string) (amqp.Queue, error)
 
 	// -- Publish / Consume --
 	Publish(ctx context.Context, opts PublishOptions) error
 	PublishJSON(ctx context.Context, data interface{}, opts PublishOptions) error
+	PublishWithRetry(ctx context.Context, opts PublishOptions, maxRetries int, retryDelay time.Duration) error
+	PublishWithConfirm(ctx context.Context, opts PublishOptions, timeout time.Duration) error
 	Consume(ctx context.Context, opts ConsumeOptions, handler func(context.Context, amqp.Delivery)) error
+	ConsumeLimited(ctx context.Context, opts ConsumeOptions, maxMessages int, handler func(context.Context, amqp.Delivery)) error
 
 	// -- Other --
 	SetQos(prefetchCount, prefetchSize int, global bool) error
 	Cancel(consumerTag string) error
 	Close(log *logrus.Logger)
+	Reconnect(url string) error
+	GracefulShutdown(log *logrus.Logger)
 }
 
 // rabbitBroker is an implementation of RabbitBroker
