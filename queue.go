@@ -1,4 +1,4 @@
-package cifra_rabbit
+package rerabbit
 
 import (
 	"context"
