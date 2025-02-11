@@ -2,78 +2,115 @@ package rerabbit
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 
 	"github.com/streadway/amqp"
 )
 
-type PublishOptions struct {
-	QueueName      string
-	RoutingKey     string
-	DeclareQueue   bool
-	QueueDurable   bool
-	QueueAutoDel   bool
-	QueueExclusive bool
-	QueueArgs      amqp.Table
-
-	// Параметры самого Publish
-	Exchange    string
-	Mandatory   bool
-	Immediate   bool
-	ContentType string
+type ConsumeOptions struct {
+	QueueName   string
+	ConsumerTag string
+	AutoAck     bool
+	Exclusive   bool
+	NoLocal     bool
+	NoWait      bool
+	Args        amqp.Table
 }
 
-// Publish отправляет сообщение в exchange с routingKey.
-// Опционально может объявить и привязать очередь перед публикацией.
-func (b *rabbitBroker) Publish(ctx context.Context, body []byte, opts PublishOptions) error {
-	// Если надо объявить/привязать очередь — делаем
-	if opts.DeclareQueue {
-		if opts.QueueName == "" {
-			return fmt.Errorf("queue name must not be empty when DeclareQueue is true")
-		}
+type PublishOptions struct {
+	Exchange   string
+	RoutingKey string
+	Mandatory  bool
+	Immediate  bool
 
-		err := b.DeclareAndBindQueue(
-			opts.QueueName,
-			opts.RoutingKey,
-			opts.QueueDurable,
-			opts.QueueAutoDel,
-			opts.QueueExclusive,
-			opts.QueueArgs,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to declare/bind queue: %w", err)
-		}
+	ContentType   string
+	DeliveryMode  uint8 // 1=Transient, 2=Persistent
+	Headers       amqp.Table
+	CorrelationID string
+	ReplyTo       string
+
+	Body []byte
+}
+
+// Publish publishes a message to the exchange with the specified routing key.
+func (r *rabbitBroker) Publish(ctx context.Context, opts PublishOptions) error {
+	if opts.ContentType == "" {
+		opts.ContentType = "application/json"
 	}
-
-	// Укажем exchange по умолчанию, если не задан в opts
-	exchangeName := b.exchange
-	if opts.Exchange != "" {
-		exchangeName = opts.Exchange
-	}
-
-	// Публикуем
 	pub := amqp.Publishing{
-		ContentType: opts.ContentType,
-		Body:        body,
-	}
-	if pub.ContentType == "" {
-		pub.ContentType = "application/json"
+		ContentType:   opts.ContentType,
+		Body:          opts.Body,
+		DeliveryMode:  opts.DeliveryMode,
+		Headers:       opts.Headers,
+		CorrelationId: opts.CorrelationID,
+		ReplyTo:       opts.ReplyTo,
 	}
 
-	err := b.channel.Publish(
-		exchangeName,
-		opts.RoutingKey,
-		opts.Mandatory,
-		opts.Immediate,
-		pub,
+	resultCh := make(chan error, 1)
+
+	go func() {
+		err := r.channel.Publish(
+			opts.Exchange,
+			opts.RoutingKey,
+			opts.Mandatory,
+			opts.Immediate,
+			pub,
+		)
+		resultCh <- err
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-resultCh:
+		return err
+	}
+}
+
+// PublishJSON json-encodes the data and publishes it to the exchange with the specified routing key.
+func (r *rabbitBroker) PublishJSON(ctx context.Context, data interface{}, opts PublishOptions) error {
+	// маршалим в JSON
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	opts.Body = jsonData
+	if opts.ContentType == "" {
+		opts.ContentType = "application/json"
+	}
+	return r.Publish(ctx, opts)
+}
+
+// Consume consumes messages from the queue.
+func (r *rabbitBroker) Consume(ctx context.Context, opts ConsumeOptions, handler func(context.Context, amqp.Delivery)) error {
+	msgs, err := r.channel.Consume(
+		opts.QueueName,
+		opts.ConsumerTag,
+		opts.AutoAck,
+		opts.Exclusive,
+		opts.NoLocal,
+		opts.NoWait,
+		opts.Args,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to publish message: %w", err)
+		return err
 	}
 
-	return nil
-}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				// Останавливаем consumer
+				_ = r.channel.Cancel(opts.ConsumerTag, false)
+				return
+			case msg, ok := <-msgs:
+				if !ok {
+					return
+				}
+				handler(ctx, msg)
+			}
+		}
+	}()
 
-func (b *rabbitBroker) SetQos(prefetchCount, prefetchSize int, global bool) error {
-	return b.channel.Qos(prefetchCount, prefetchSize, global)
+	return nil
 }

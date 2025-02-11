@@ -7,69 +7,50 @@ import (
 	"github.com/streadway/amqp"
 )
 
+// RabbitBroker is an interface for interacting with RabbitMQ
 type RabbitBroker interface {
-	DeclareAndBindQueue(queueName, routingKey string, durable, autoDelete, exclusive bool, args amqp.Table) error
-	ConsumeQueue(ctx context.Context, queueName, consumerTag string, handler func(context.Context, []byte) error) error
+	// -- Exchange management --
+	ExchangeDeclare(opts ExchangeOptions) error
+	ExchangeDelete(name string, ifUnused, noWait bool) error
 
-	Publish(ctx context.Context, body []byte, opts PublishOptions) error
+	// -- Queue management --
+	QueueDeclare(opts QueueOptions) (amqp.Queue, error)
+	QueueDelete(name string, ifUnused, ifEmpty, noWait bool) (int, error)
 
-	Close(log *logrus.Logger)
+	// -- Bind / Unbind --
+	QueueBind(opts BindOptions) error
+	QueueUnbind(opts UnbindOptions) error
+
+	// -- Publish / Consume --
+	Publish(ctx context.Context, opts PublishOptions) error
+	PublishJSON(ctx context.Context, data interface{}, opts PublishOptions) error
+	Consume(ctx context.Context, opts ConsumeOptions, handler func(context.Context, amqp.Delivery)) error
+
+	// -- Other --
+	SetQos(prefetchCount, prefetchSize int, global bool) error
 	Cancel(consumerTag string) error
+	Close(log *logrus.Logger)
 }
 
+// rabbitBroker is an implementation of RabbitBroker
 type rabbitBroker struct {
-	connection *amqp.Connection
-	channel    *amqp.Channel
-	exchange   string
+	conn    *amqp.Connection
+	channel *amqp.Channel
 }
 
-func NewBroker(
-	url string,
-	exchangeName string, // name of the exchange
-	kind string, // type of the exchange (direct, topic, headers)
-	durable bool, // durable exchange survives exchange restart
-	autoDel bool, // auto-deleted exchange is deleted when last queue is unbound
-	internal bool, // internal exchange is not listed in exchange.declare-ok
-	noWait bool, // no-wait exchange.declare-ok
-) (RabbitBroker, error) {
-	conn, err := amqp.Dial(url)
+// NewBroker creates a connection to RabbitMQ, but does not declare anything
+func NewBroker(amqpURL string) (RabbitBroker, error) {
+	conn, err := amqp.Dial(amqpURL)
 	if err != nil {
 		return nil, err
 	}
-
 	ch, err := conn.Channel()
 	if err != nil {
-		err = conn.Close()
-		if err != nil {
-			return nil, err
-		}
+		_ = conn.Close()
 		return nil, err
 	}
-
-	err = ch.ExchangeDeclare(
-		exchangeName,
-		kind,
-		durable,
-		autoDel,
-		internal,
-		noWait,
-		nil,
-	)
-	if err != nil {
-		err = ch.Close()
-		if err != nil {
-			return nil, err
-		}
-		err = conn.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, err
-	}
-
 	return &rabbitBroker{
-		connection: conn,
-		channel:    ch,
-		exchange:   exchangeName,
+		conn:    conn,
+		channel: ch,
 	}, nil
 }

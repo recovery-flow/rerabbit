@@ -1,55 +1,67 @@
 package rerabbit
 
 import (
-	"context"
-
 	"github.com/streadway/amqp"
 )
 
-func (b *rabbitBroker) DeclareAndBindQueue(queueName, routingKey string, durable, autoDelete, exclusive bool, args amqp.Table) error {
-	// 1. Declare queue
-	_, err := b.channel.QueueDeclare(
-		queueName,
-		durable,
-		autoDelete,
-		exclusive,
-		false,
-		args,
-	)
-	if err != nil {
-		return err
-	}
-
-	// 2. Bind queue
-	err = b.channel.QueueBind(
-		queueName,
-		routingKey,
-		b.exchange,
-		false,
-		nil,
-	)
-	return err
+type QueueOptions struct {
+	Name       string
+	Durable    bool
+	AutoDelete bool
+	Exclusive  bool
+	NoWait     bool
+	Args       amqp.Table
 }
 
-func (b *rabbitBroker) ConsumeQueue(ctx context.Context, queueName, consumerTag string, handler func(context.Context, []byte) error) error {
-	msgs, err := b.channel.Consume(
-		queueName,
-		consumerTag, false, false, false, false, nil,
-	)
-	if err != nil {
-		return err
-	}
-
-	go b.handleMessages(ctx, msgs, handler)
-	return nil
+type BindOptions struct {
+	QueueName  string
+	RoutingKey string
+	Exchange   string
+	NoWait     bool
+	Args       amqp.Table
 }
 
-func (b *rabbitBroker) handleMessages(ctx context.Context, msgs <-chan amqp.Delivery, handler func(context.Context, []byte) error) {
-	for msg := range msgs {
-		if err := handler(ctx, msg.Body); err != nil {
-			_ = msg.Nack(false, true) // requeue = true
-		} else {
-			_ = msg.Ack(false)
-		}
-	}
+type UnbindOptions struct {
+	QueueName  string
+	RoutingKey string
+	Exchange   string
+	Args       amqp.Table
+}
+
+// QueueDeclare creates a queue with parameters
+func (r *rabbitBroker) QueueDeclare(opts QueueOptions) (amqp.Queue, error) {
+	return r.channel.QueueDeclare(
+		opts.Name,
+		opts.Durable,
+		opts.AutoDelete,
+		opts.Exclusive,
+		opts.NoWait,
+		opts.Args,
+	)
+}
+
+// QueueDelete deletes a queue
+func (r *rabbitBroker) QueueDelete(name string, ifUnused, ifEmpty, noWait bool) (int, error) {
+	return r.channel.QueueDelete(name, ifUnused, ifEmpty, noWait)
+}
+
+// QueueBind binds a queue to an exchange
+func (r *rabbitBroker) QueueBind(opts BindOptions) error {
+	return r.channel.QueueBind(
+		opts.QueueName,
+		opts.RoutingKey,
+		opts.Exchange,
+		opts.NoWait,
+		opts.Args,
+	)
+}
+
+// QueueUnbind unbinds a queue from an exchange
+func (r *rabbitBroker) QueueUnbind(opts UnbindOptions) error {
+	return r.channel.QueueUnbind(
+		opts.QueueName,
+		opts.RoutingKey,
+		opts.Exchange,
+		opts.Args,
+	)
 }
